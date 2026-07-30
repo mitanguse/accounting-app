@@ -6,7 +6,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>记账小管家</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<!-- No external JS dependencies, pure native implementation -->
 <style>
 /* ===== Reset & Base ===== */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -177,6 +177,35 @@ body {
 }
 .empty-state .emoji-big { font-size: 48px; margin-bottom: 12px; }
 .empty-state p { font-size: 15px; }
+
+/* ===== History Section ===== */
+.history-toggle {
+  display: block; width: 100%; padding: 14px 0; margin: 8px 0 4px;
+  border: none; border-radius: 12px;
+  background: #f2f2f7; color: #007aff;
+  font-size: 15px; font-weight: 600; cursor: pointer;
+  text-align: center; transition: 0.15s;
+}
+.history-toggle:active { background: #e9e9eb; }
+.history-toggle .arrow { display: inline-block; transition: transform 0.25s; margin-left: 4px; }
+.history-toggle .arrow.open { transform: rotate(180deg); }
+
+.history-section { display: none; }
+.history-section.open { display: block; }
+
+.history-date-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 0 6px; margin-top: 4px;
+}
+.history-date-header:first-child { padding-top: 4px; }
+.history-date-header .line { flex: 1; height: 1px; background: #e9e9eb; }
+.history-date-header .label {
+  font-size: 13px; color: #8e8e93; font-weight: 500;
+  white-space: nowrap;
+}
+.history-date-header .day-total {
+  font-size: 12px; color: #c7c7cc;
+}
 
 /* ===== Report Page ===== */
 .report-summary {
@@ -465,6 +494,11 @@ body {
         <span class="date-label" id="todayLabel">今天</span>
       </div>
       <div id="recordsList"></div>
+      <button class="history-toggle" id="historyToggle" onclick="toggleHistory()">
+        <span id="historyToggleText">📋 查看历史记录</span>
+        <span class="arrow" id="historyArrow">▼</span>
+      </button>
+      <div class="history-section" id="historySection"></div>
     </div>
 
     <!-- Page 2: 月报 -->
@@ -854,6 +888,89 @@ function renderFullRecords(records) {
 }
 
 // Delete record
+// ===== History Section =====
+let historyOpen = false;
+
+function toggleHistory() {
+  historyOpen = !historyOpen;
+  const section = document.getElementById('historySection');
+  const text = document.getElementById('historyToggleText');
+  const arrow = document.getElementById('historyArrow');
+  if (historyOpen) {
+    section.classList.add('open');
+    text.textContent = '📋 收起历史记录';
+    arrow.classList.add('open');
+    renderHistory();
+  } else {
+    section.classList.remove('open');
+    text.textContent = '📋 查看历史记录';
+    arrow.classList.remove('open');
+  }
+}
+
+function renderHistory() {
+  const section = document.getElementById('historySection');
+  if (data.records.length === 0) {
+    section.innerHTML = '<div class="empty-state"><div class="emoji-big">📭</div><p>还没有任何记录</p></div>';
+    return;
+  }
+
+  // Group records by date (excluding today)
+  const now = getNow();
+  const todayStr = now.date;
+  const historyRecords = data.records.filter(r => r.date !== todayStr)
+    .sort((a, b) => b.timestamp - a.timestamp);
+
+  if (historyRecords.length === 0) {
+    section.innerHTML = '<div class="empty-state"><div class="emoji-big">📅</div><p>还没有更早的记录</p></div>';
+    return;
+  }
+
+  // Group by date
+  const groups = {};
+  historyRecords.forEach(r => {
+    if (!groups[r.date]) groups[r.date] = [];
+    groups[r.date].push(r);
+  });
+
+  // Sort dates descending
+  const dates = Object.keys(groups).sort().reverse();
+  const todayDate = new Date();
+
+  section.innerHTML = dates.map(date => {
+    const records = groups[date];
+    const dayTotal = records.reduce((s, r) => s + r.amount, 0);
+    // Build date label
+    const parts = date.split('-');
+    const d = new Date(+parts[0], +parts[1] - 1, +parts[2]);
+    const diffDays = Math.round((todayDate - d) / 86400000);
+    let dateLabel;
+    if (diffDays === 1) dateLabel = '昨天';
+    else if (diffDays === 2) dateLabel = '前天';
+    else dateLabel = (+parts[1]) + '月' + (+parts[2]) + '日';
+
+    const recordsHtml = records.map(r => `
+      <div class="record-item">
+        <div class="cat-icon" style="background:${catColor(r.category)}20;color:${catColor(r.category)}">${catIcon(r.category)}</div>
+        <div class="info">
+          <div class="note">${escapeHtml(r.note)}</div>
+          <div class="meta">${r.category}</div>
+        </div>
+        <div class="amount">¥${r.amount.toFixed(2)}</div>
+        <button class="btn-del" onclick="deleteRecord('${r.id}')">✕</button>
+      </div>
+    `).join('');
+
+    return `
+      <div class="history-date-header">
+        <span class="label">${dateLabel}</span>
+        <span class="day-total">¥${dayTotal.toFixed(2)}</span>
+        <span class="line"></span>
+      </div>
+      ${recordsHtml}`;
+  }).join('');
+}
+
 function deleteRecord(id) {
   if (!confirm('删除这条记录？')) return;
   data.records = data.records.filter(r => r.id !== id);
@@ -965,7 +1082,7 @@ function addRecord(amount, note, category) {
 
 // ===== Report Page =====
 let reportYear, reportMonth;
-let pieChartInstance = null;
+// Native canvas doughnut chart (no external dependencies)
 
 function initReport() {
   const now = getNow();
@@ -1023,48 +1140,88 @@ function renderReport() {
 }
 
 function renderPieChart(byCat) {
-  const ctx = document.getElementById('pieChart').getContext('2d');
+  const canvas = document.getElementById('pieChart');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.parentElement.getBoundingClientRect();
+  const w = rect.width;
+  const h = 220;
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+  ctx.scale(dpr, dpr);
 
-  if (pieChartInstance) {
-    pieChartInstance.destroy();
-    pieChartInstance = null;
-  }
+  ctx.clearRect(0, 0, w, h);
 
   const entries = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
-  if (entries.length === 0) {
-    return;
-  }
+  if (entries.length === 0) return;
 
-  pieChartInstance = new Chart(ctx, {
-    type: 'doughnut',
-    data: {
-      labels: entries.map(e => catIcon(e[0]) + ' ' + e[0]),
-      datasets: [{
-        data: entries.map(e => e[1]),
-        backgroundColor: entries.map(e => catColor(e[0])),
-        borderWidth: 0,
-      }]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: {
-          position: 'bottom',
-          labels: { padding: 16, font: { size: 12 } }
-        },
-        tooltip: {
-          callbacks: {
-            label: function(context) {
-              const total = context.dataset.data.reduce((a, b) => a + b, 0);
-              const pct = ((context.raw / total) * 100).toFixed(1);
-              return '¥' + context.raw.toFixed(2) + ' (' + pct + '%)';
-            }
-          }
-        }
-      },
-      cutout: '60%',
-    }
+  const total = entries.reduce((s, e) => s + e[1], 0);
+  const cx = w * 0.35;
+  const cy = h / 2;
+  const radius = Math.min(80, cx - 10, cy - 10);
+  const innerRatio = 0.55;
+
+  // Draw doughnut
+  let startAngle = -Math.PI / 2;
+  entries.forEach(([cat, amount]) => {
+    const sliceAngle = (amount / total) * Math.PI * 2;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, radius, startAngle, startAngle + sliceAngle);
+    ctx.closePath();
+    ctx.fillStyle = catColor(cat);
+    ctx.fill();
+
+    // Inner cutout (white circle)
+    startAngle += sliceAngle;
+  });
+
+  // Draw inner white circle for doughnut effect
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius * innerRatio, 0, Math.PI * 2);
+  ctx.fillStyle = '#fff';
+  ctx.fill();
+
+  // Center text
+  ctx.fillStyle = '#1d1d1f';
+  ctx.font = 'bold 18px -apple-system, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('¥' + total.toFixed(0), cx, cy - 6);
+  ctx.fillStyle = '#8e8e93';
+  ctx.font = '11px -apple-system, sans-serif';
+  ctx.fillText('总支出', cx, cy + 16);
+
+  // Legend on the right
+  const legendX = w * 0.6;
+  let legendY = 30;
+  const itemH = 24;
+  const maxItems = Math.min(entries.length, Math.floor((h - 20) / itemH));
+  entries.slice(0, maxItems).forEach(([cat, amount]) => {
+    const pct = ((amount / total) * 100).toFixed(1);
+
+    // Color dot
+    ctx.beginPath();
+    ctx.arc(legendX + 6, legendY + 8, 5, 0, Math.PI * 2);
+    ctx.fillStyle = catColor(cat);
+    ctx.fill();
+
+    // Label
+    ctx.fillStyle = '#1d1d1f';
+    ctx.font = '12px -apple-system, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    const label = catIcon(cat) + ' ' + cat;
+    ctx.fillText(label, legendX + 16, legendY + 8);
+
+    // Amount + pct
+    ctx.fillStyle = '#8e8e93';
+    ctx.font = '11px -apple-system, sans-serif';
+    ctx.fillText('¥' + amount.toFixed(0) + ' (' + pct + '%)', legendX + 16, legendY + 24);
+
+    legendY += itemH + 4;
   });
 }
 
