@@ -178,34 +178,62 @@ body {
 .empty-state .emoji-big { font-size: 48px; margin-bottom: 12px; }
 .empty-state p { font-size: 15px; }
 
-/* ===== History Section ===== */
-.history-toggle {
-  display: block; width: 100%; padding: 14px 0; margin: 8px 0 4px;
-  border: none; border-radius: 12px;
-  background: #f2f2f7; color: #007aff;
-  font-size: 15px; font-weight: 600; cursor: pointer;
-  text-align: center; transition: 0.15s;
+/* ===== Date Filter ===== */
+.date-filter {
+  display: flex; gap: 6px; align-items: center;
+  margin-bottom: 10px; flex-wrap: wrap;
 }
-.history-toggle:active { background: #e9e9eb; }
-.history-toggle .arrow { display: inline-block; transition: transform 0.25s; margin-left: 4px; }
-.history-toggle .arrow.open { transform: rotate(180deg); }
+.filter-btn {
+  padding: 6px 12px; border: 1px solid #e9e9eb; border-radius: 16px;
+  background: #fff; font-size: 13px; color: #1d1d1f;
+  cursor: pointer; transition: 0.15s; flex-shrink: 0;
+}
+.filter-btn.active {
+  background: #007aff; color: #fff; border-color: #007aff;
+}
+.filter-btn:active { transform: scale(0.96); }
+.filter-date {
+  padding: 5px 8px; border: 1px solid #e9e9eb; border-radius: 16px;
+  font-size: 13px; color: #1d1d1f; background: #fff;
+  flex-shrink: 0; max-width: 150px;
+}
+.records-summary {
+  display: flex; justify-content: space-between; align-items: center;
+  background: #f2f2f7; border-radius: 12px;
+  padding: 10px 14px; margin-bottom: 6px; font-size: 13px; color: #8e8e93;
+}
+.records-summary .sum-strong { color: #1d1d1f; font-weight: 600; font-size: 15px; }
+.records-count { font-size: 13px; color: #8e8e93; }
 
+/* ===== History Section (legacy, hidden) ===== */
+.history-toggle { display: none; }
 .history-section { display: none; }
-.history-section.open { display: block; }
 
+.history-date-header .date-sub {
+  font-size: 12px; color: #c7c7cc;
+}
+.history-date-header .label {
+  font-size: 14px; font-weight: 600; color: #1d1d1f;
+}
 .history-date-header {
   display: flex; align-items: center; gap: 10px;
   padding: 12px 0 6px; margin-top: 4px;
 }
-.history-date-header:first-child { padding-top: 4px; }
-.history-date-header .line { flex: 1; height: 1px; background: #e9e9eb; }
 .history-date-header .label {
-  font-size: 13px; color: #8e8e93; font-weight: 500;
+  font-size: 14px; font-weight: 600; color: #1d1d1f;
   white-space: nowrap;
 }
-.history-date-header .day-total {
+.history-date-header .date-sub {
   font-size: 12px; color: #c7c7cc;
 }
+.history-date-header .day-total {
+  font-size: 13px; font-weight: 600; color: #1d1d1f;
+  margin-left: auto;
+}
+.history-date-header .line {
+  flex: 1; height: 1px; background: #e9e9eb;
+}
+.history-date-header:first-child { padding-top: 4px; }
 
 /* ===== Report Page ===== */
 .report-summary {
@@ -490,15 +518,19 @@ body {
         </div>
       </div>
       <div class="records-header">
-        <h2>今日记录</h2>
-        <span class="date-label" id="todayLabel">今天</span>
+        <h2>全部记录</h2>
+        <span class="records-count" id="recordsCount"></span>
       </div>
+      <div class="date-filter" id="dateFilter">
+        <button class="filter-btn active" data-filter="all">全部</button>
+        <button class="filter-btn" data-filter="today">今天</button>
+        <button class="filter-btn" data-filter="yesterday">昨天</button>
+        <button class="filter-btn" data-filter="week">本周</button>
+        <button class="filter-btn" data-filter="month">本月</button>
+        <input type="date" class="filter-date" id="filterDate" title="按日期查看">
+      </div>
+      <div class="records-summary" id="recordsSummary"></div>
       <div id="recordsList"></div>
-      <button class="history-toggle" id="historyToggle" onclick="toggleHistory()">
-        <span id="historyToggleText">📋 查看历史记录</span>
-        <span class="arrow" id="historyArrow">▼</span>
-      </button>
-      <div class="history-section" id="historySection"></div>
     </div>
 
     <!-- Page 2: 月报 -->
@@ -837,30 +869,99 @@ function updateHeader() {
   document.getElementById('totalDays').textContent = '已过' + daysPassed + '天';
 }
 
-// Render records list
-function renderRecords() {
-  const now = getNow();
-  const todayRecords = data.records.filter(r => r.date === now.date)
-    .sort((a, b) => b.timestamp - a.timestamp);
-  const el = document.getElementById('recordsList');
-  document.getElementById('todayLabel').textContent = formatDate(now.date);
+// ===== Record Filter State =====
+let currentFilter = 'all';
+let customDate = '';
 
-  if (todayRecords.length === 0) {
-    el.innerHTML = '<div class="empty-state"><div class="emoji-big">📭</div><p>今天还没花钱呢，真棒！</p></div>';
+// 筛选匹配
+function recordMatchesFilter(r) {
+  const now = getNow();
+  if (currentFilter === 'today') return r.date === now.date;
+  if (currentFilter === 'yesterday') {
+    const y = new Date(now.timestamp - 86400000);
+    const ys = y.getFullYear() + '-' + String(y.getMonth()+1).padStart(2,'0') + '-' + String(y.getDate()).padStart(2,'0');
+    return r.date === ys;
+  }
+  if (currentFilter === 'week') {
+    const d = new Date(r.date + 'T00:00:00');
+    const nowD = new Date(now.date + 'T00:00:00');
+    const day = (nowD.getDay() + 6) % 7; // 周一为0
+    const weekStart = new Date(nowD.getTime() - day * 86400000);
+    return d >= weekStart && d <= nowD;
+  }
+  if (currentFilter === 'month') return r.date.startsWith(now.date.slice(0, 7));
+  if (currentFilter === 'custom' && customDate) return r.date === customDate;
+  return true; // all
+}
+
+// 日期分组标题
+function dateGroupLabel(dateStr) {
+  const now = getNow();
+  if (dateStr === now.date) return '今天';
+  const y = new Date(now.timestamp - 86400000);
+  const ys = y.getFullYear() + '-' + String(y.getMonth()+1).padStart(2,'0') + '-' + String(y.getDate()).padStart(2,'0');
+  if (dateStr === ys) return '昨天';
+  const parts = dateStr.split('-');
+  return parseInt(parts[1]) + '月' + parseInt(parts[2]) + '日';
+}
+
+// Render records list (全部记录，按日期分组)
+function renderRecords() {
+  const el = document.getElementById('recordsList');
+  const filtered = data.records.filter(recordMatchesFilter)
+    .sort((a, b) => b.timestamp - a.timestamp);
+
+  // 统计概览
+  const total = filtered.reduce((s, r) => s + r.amount, 0);
+  document.getElementById('recordsCount').textContent = filtered.length + '笔';
+  const summaryEl = document.getElementById('recordsSummary');
+  summaryEl.innerHTML = '<span>共 <span class="sum-strong">' + filtered.length + '</span> 笔</span><span>合计 <span class="sum-strong">¥' + total.toFixed(2) + '</span></span>';
+
+  if (filtered.length === 0) {
+    const msgs = {
+      'all': '还没有任何记录，记一笔吧！',
+      'today': '今天还没花钱呢，真棒！',
+      'yesterday': '昨天没有记录',
+      'week': '本周还没有记录',
+      'month': '本月还没有记录',
+      'custom': '这一天没有记录',
+    };
+    el.innerHTML = '<div class="empty-state"><div class="emoji-big">📭</div><p>' + (msgs[currentFilter] || msgs.all) + '</p></div>';
     return;
   }
 
-  el.innerHTML = todayRecords.map(r => `
-    <div class="record-item">
-      <div class="cat-icon" style="background:${catColor(r.category)}20;color:${catColor(r.category)}">${catIcon(r.category)}</div>
-      <div class="info">
-        <div class="note">${escapeHtml(r.note)}</div>
-        <div class="meta">${r.category}</div>
+  // 按日期分组
+  const groups = {};
+  filtered.forEach(r => {
+    if (!groups[r.date]) groups[r.date] = [];
+    groups[r.date].push(r);
+  });
+  const dates = Object.keys(groups).sort().reverse();
+
+  el.innerHTML = dates.map(date => {
+    const records = groups[date];
+    const dayTotal = records.reduce((s, r) => s + r.amount, 0);
+    const recordsHtml = records.map(r => `
+      <div class="record-item">
+        <div class="cat-icon" style="background:${catColor(r.category)}20;color:${catColor(r.category)}">${catIcon(r.category)}</div>
+        <div class="info">
+          <div class="note">${escapeHtml(r.note)}</div>
+          <div class="meta">${r.category}</div>
+        </div>
+        <div class="amount">¥${r.amount.toFixed(2)}</div>
+        <button class="btn-del" onclick="deleteRecord('${r.id}')">✕</button>
       </div>
-      <div class="amount">¥${r.amount.toFixed(2)}</div>
-      <button class="btn-del" onclick="deleteRecord('${r.id}')">✕</button>
-    </div>
-  `).join('');
+    `).join('');
+
+    return `
+      <div class="history-date-header">
+        <span class="label">${dateGroupLabel(date)}</span>
+        <span class="date-sub">${date}</span>
+        <span class="line"></span>
+        <span class="day-total">¥${dayTotal.toFixed(2)}</span>
+      </div>
+      ${recordsHtml}`;
+  }).join('');
 }
 
 function escapeHtml(text) {
@@ -888,89 +989,7 @@ function renderFullRecords(records) {
 }
 
 // Delete record
-// ===== History Section =====
-let historyOpen = false;
-
-function toggleHistory() {
-  historyOpen = !historyOpen;
-  const section = document.getElementById('historySection');
-  const text = document.getElementById('historyToggleText');
-  const arrow = document.getElementById('historyArrow');
-  if (historyOpen) {
-    section.classList.add('open');
-    text.textContent = '📋 收起历史记录';
-    arrow.classList.add('open');
-    renderHistory();
-  } else {
-    section.classList.remove('open');
-    text.textContent = '📋 查看历史记录';
-    arrow.classList.remove('open');
-  }
-}
-
-function renderHistory() {
-  const section = document.getElementById('historySection');
-  if (data.records.length === 0) {
-    section.innerHTML = '<div class="empty-state"><div class="emoji-big">📭</div><p>还没有任何记录</p></div>';
-    return;
-  }
-
-  // Group records by date (excluding today)
-  const now = getNow();
-  const todayStr = now.date;
-  const historyRecords = data.records.filter(r => r.date !== todayStr)
-    .sort((a, b) => b.timestamp - a.timestamp);
-
-  if (historyRecords.length === 0) {
-    section.innerHTML = '<div class="empty-state"><div class="emoji-big">📅</div><p>还没有更早的记录</p></div>';
-    return;
-  }
-
-  // Group by date
-  const groups = {};
-  historyRecords.forEach(r => {
-    if (!groups[r.date]) groups[r.date] = [];
-    groups[r.date].push(r);
-  });
-
-  // Sort dates descending
-  const dates = Object.keys(groups).sort().reverse();
-  const todayDate = new Date();
-
-  section.innerHTML = dates.map(date => {
-    const records = groups[date];
-    const dayTotal = records.reduce((s, r) => s + r.amount, 0);
-    // Build date label
-    const parts = date.split('-');
-    const d = new Date(+parts[0], +parts[1] - 1, +parts[2]);
-    const diffDays = Math.round((todayDate - d) / 86400000);
-    let dateLabel;
-    if (diffDays === 1) dateLabel = '昨天';
-    else if (diffDays === 2) dateLabel = '前天';
-    else dateLabel = (+parts[1]) + '月' + (+parts[2]) + '日';
-
-    const recordsHtml = records.map(r => `
-      <div class="record-item">
-        <div class="cat-icon" style="background:${catColor(r.category)}20;color:${catColor(r.category)}">${catIcon(r.category)}</div>
-        <div class="info">
-          <div class="note">${escapeHtml(r.note)}</div>
-          <div class="meta">${r.category}</div>
-        </div>
-        <div class="amount">¥${r.amount.toFixed(2)}</div>
-        <button class="btn-del" onclick="deleteRecord('${r.id}')">✕</button>
-      </div>
-    `).join('');
-
-    return `
-      <div class="history-date-header">
-        <span class="label">${dateLabel}</span>
-        <span class="day-total">¥${dayTotal.toFixed(2)}</span>
-        <span class="line"></span>
-      </div>
-      ${recordsHtml}`;
-  }).join('');
-}
-
+// ===== Delete Record =====
 function deleteRecord(id) {
   if (!confirm('删除这条记录？')) return;
   data.records = data.records.filter(r => r.id !== id);
@@ -1514,9 +1533,36 @@ function refreshAll() {
   if (document.getElementById('pageReport').classList.contains('active')) renderReport();
 }
 
+// ===== Date Filter Init =====
+function initDateFilter() {
+  const btns = document.querySelectorAll('.filter-btn');
+  btns.forEach(btn => {
+    btn.addEventListener('click', function() {
+      btns.forEach(b => b.classList.remove('active'));
+      this.classList.add('active');
+      currentFilter = this.dataset.filter;
+      if (currentFilter !== 'custom') {
+        customDate = '';
+        document.getElementById('filterDate').value = '';
+      }
+      renderRecords();
+    });
+  });
+  const dateInput = document.getElementById('filterDate');
+  dateInput.addEventListener('change', function() {
+    if (this.value) {
+      currentFilter = 'custom';
+      customDate = this.value;
+      btns.forEach(b => b.classList.remove('active'));
+      renderRecords();
+    }
+  });
+}
+
 // ===== Init =====
 document.addEventListener('DOMContentLoaded', function() {
   initTabs();
+  initDateFilter();
   initReport();
   initSearch();
   initBudget();
