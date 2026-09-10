@@ -758,7 +758,11 @@ function loadData() {
 
 // 只写本地存储（同步合并时用，不触发上传）
 function persistLocal() {
-  localStorage.setItem('acc_data', JSON.stringify(data));
+  try {
+    localStorage.setItem('acc_data', JSON.stringify(data));
+  } catch (e) {
+    showBanner('浏览器禁用了本地存储，数据无法保存（' + e.message + '）');
+  }
 }
 
 function saveData() {
@@ -773,6 +777,31 @@ if (Object.keys(data.rules).length === 0) {
   for (const k in DEFAULT_RULES) { data.rules[k] = DEFAULT_RULES[k]; data.ruleTs[k] = 0; }
   persistLocal();
 }
+
+// ===== 全局错误提示条（出问题时能一眼看到）=====
+function showBanner(msg) {
+  try {
+    let el = document.getElementById('errBanner');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'errBanner';
+      el.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:99999;background:#ff3b30;color:#fff;' +
+        'font-size:12px;line-height:1.5;padding:8px 12px;word-break:break-all;max-height:40%;overflow:auto;' +
+        'text-align:left;box-shadow:0 2px 8px rgba(0,0,0,.2)';
+      document.body.appendChild(el);
+    }
+    el.textContent = '⚠️ ' + msg + '（点这里关闭）';
+    el.onclick = function () { el.remove(); };
+  } catch (e) {}
+}
+
+window.addEventListener('error', function (e) {
+  showBanner('脚本出错：' + e.message + (e.lineno ? '（第 ' + e.lineno + ' 行）' : ''));
+});
+window.addEventListener('unhandledrejection', function (e) {
+  const r = e.reason;
+  showBanner('异步出错：' + (r && r.message ? r.message : r));
+});
 
 // ===== 云同步 · 配置（GitHub Gist）=====
 const SYNC_CFG_KEY = 'acc_sync';
@@ -797,7 +826,11 @@ function loadSyncCfg() {
 }
 
 function saveSyncCfg() {
-  localStorage.setItem(SYNC_CFG_KEY, JSON.stringify(syncCfg));
+  try {
+    localStorage.setItem(SYNC_CFG_KEY, JSON.stringify(syncCfg));
+  } catch (e) {
+    showBanner('无法保存同步配置：' + e.message);
+  }
 }
 
 function syncConfigured() { return !!syncCfg.token; }
@@ -1525,6 +1558,8 @@ function renderPieChart(byCat) {
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.parentElement.getBoundingClientRect();
   const w = rect.width;
+  // 月报页默认隐藏，此时宽度为 0，直接跳过绘制（切到月报页会重新调用）
+  if (!w || w < 40) return;
   const h = 220;
   canvas.width = w * dpr;
   canvas.height = h * dpr;
@@ -1540,7 +1575,7 @@ function renderPieChart(byCat) {
   const total = entries.reduce((s, e) => s + e[1], 0);
   const cx = w * 0.35;
   const cy = h / 2;
-  const radius = Math.min(80, cx - 10, cy - 10);
+  const radius = Math.max(10, Math.min(80, cx - 10, cy - 10));
   const innerRatio = 0.55;
 
   // Draw doughnut
@@ -1933,23 +1968,33 @@ function initDateFilter() {
 }
 
 // ===== Init =====
+// 任何一步出错都不影响其它模块（避免一个报错拖垮整个页面）
+function safeInit(name, fn) {
+  try {
+    fn();
+  } catch (e) {
+    console.error('[init] ' + name + ' 失败:', e);
+    showBanner('初始化「' + name + '」出错：' + e.message);
+  }
+}
+
 document.addEventListener('DOMContentLoaded', function() {
-  initTabs();
-  initDateFilter();
-  initReport();
-  initSearch();
-  initBudget();
-  setupRuleDialog();
-  initSync();
-  renderRules();
-  refreshAll();
-  updateHeader();
+  safeInit('页面切换', initTabs);
+  safeInit('日期筛选', initDateFilter);
+  safeInit('月报', initReport);
+  safeInit('搜索', initSearch);
+  safeInit('预算', initBudget);
+  safeInit('规则弹窗', setupRuleDialog);
+  safeInit('云同步', initSync);
+  safeInit('规则列表', renderRules);
+  safeInit('刷新界面', refreshAll);
+  safeInit('顶部统计', updateHeader);
 
   // 已配置云同步：启动时静默拉取一次
   if (syncConfigured()) syncNow(false);
 
   // Focus input
-  document.getElementById('inputField').focus();
+  safeInit('输入框聚焦', function () { document.getElementById('inputField').focus(); });
 });
 </script>
 </body>
