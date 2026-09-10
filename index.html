@@ -615,6 +615,25 @@ body {
         </div>
       </div>
       <div class="settings-section">
+        <div class="section-title">☁️ 云同步（跨设备）</div>
+        <div class="settings-item" style="display:block">
+          <div id="syncStatus" style="font-size:13px;color:#8e8e93;margin-bottom:10px">未配置</div>
+          <input type="password" id="syncToken" placeholder="粘贴 GitHub Token（github_pat_...）" autocomplete="off"
+            style="width:100%;padding:10px 12px;border:1px solid #e9e9eb;border-radius:10px;font-size:14px;outline:none;background:#fff">
+          <div style="display:flex;gap:8px;margin-top:10px">
+            <button class="edit-btn" id="syncSaveBtn" style="flex:1;padding:10px;font-size:14px">保存并同步</button>
+            <button class="edit-btn" id="syncNowBtn" style="flex:1;padding:10px;font-size:14px">立即同步</button>
+            <button id="syncOffBtn" style="flex:1;padding:10px;font-size:14px">关闭同步</button>
+          </div>
+          <label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:13px;color:#8e8e93">
+            <input type="checkbox" id="syncAuto" style="width:16px;height:16px"> 自动同步（改动后自动上传）
+          </label>
+        </div>
+        <div style="font-size:12px;color:#c7c7cc;margin-top:8px;line-height:1.6">
+          数据保存在你 GitHub 账号的私密 Gist 里。每台设备粘贴同一个 Token，就能共用同一份账本。
+        </div>
+      </div>
+      <div class="settings-section">
         <div class="section-title">数据管理</div>
         <div class="settings-item">
           <div class="left"><span class="icon">📤</span><span class="name">导出 CSV</span></div>
@@ -626,7 +645,7 @@ body {
         </div>
       </div>
       <div class="settings-section" style="text-align:center;color:#c7c7cc;font-size:12px;padding:20px 0">
-        💰 记账小管家 v1.0 · 数据仅存储在本地
+        💰 记账小管家 v1.1 · 支持跨设备云同步
       </div>
     </div>
 
@@ -708,25 +727,358 @@ const CAT_COLORS = {
 };
 
 // ===== Data Management =====
+function emptyData() {
+  return {
+    records: [],
+    rules: {},
+    ruleTs: {},        // 规则最后修改时间 { 关键词: ts }
+    ruleDel: {},       // 规则删除墓碑 { 关键词: ts }
+    budget: { total: 0, categories: {} },
+    budgetTs: 0,       // 预算最后修改时间
+    deleted: {},       // 记录删除墓碑 { id: ts }
+  };
+}
+
 function loadData() {
+  let d = null;
   try {
     const raw = localStorage.getItem('acc_data');
-    if (raw) return JSON.parse(raw);
+    if (raw) d = JSON.parse(raw);
   } catch(e) {}
-  return { records: [], rules: {}, budget: { total: 0, categories: {} } };
+  if (!d || typeof d !== 'object') d = emptyData();
+  // 兼容旧数据：补齐云同步所需字段
+  const base = emptyData();
+  for (const k in base) {
+    if (d[k] === undefined || d[k] === null) d[k] = base[k];
+  }
+  if (!d.budget || typeof d.budget !== 'object') d.budget = { total: 0, categories: {} };
+  if (!d.budget.categories) d.budget.categories = {};
+  return d;
+}
+
+// 只写本地存储（同步合并时用，不触发上传）
+function persistLocal() {
+  localStorage.setItem('acc_data', JSON.stringify(data));
 }
 
 function saveData() {
-  localStorage.setItem('acc_data', JSON.stringify(data));
+  persistLocal();
+  scheduleSync();
 }
 
 const data = loadData();
 
 // Merge default rules if empty
 if (Object.keys(data.rules).length === 0) {
-  data.rules = { ...DEFAULT_RULES };
-  saveData();
+  for (const k in DEFAULT_RULES) { data.rules[k] = DEFAULT_RULES[k]; data.ruleTs[k] = 0; }
+  persistLocal();
 }
+
+// ===== 云同步 · 配置（GitHub Gist）=====
+const SYNC_CFG_KEY = 'acc_sync';
+const GIST_FILE = 'accounting-data.json';
+const GIST_API = 'https://api.github.com/gists';
+const SYNC_DEBOUNCE = 3000;
+
+let syncCfg = loadSyncCfg();
+let syncTimer = null;
+let syncBusy = false;
+
+function loadSyncCfg() {
+  try {
+    const raw = localStorage.getItem(SYNC_CFG_KEY);
+    if (raw) {
+      const c = JSON.parse(raw);
+      if (typeof c.auto !== 'boolean') c.auto = true;
+      return c;
+    }
+  } catch (e) {}
+  return { token: '', gistId: '', auto: true, lastSync: 0 };
+}
+
+function saveSyncCfg() {
+  localStorage.setItem(SYNC_CFG_KEY, JSON.stringify(syncCfg));
+}
+
+function syncConfigured() { return !!syncCfg.token; }
+
+function timeAgo(ts) {
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 60) return '刚刚';
+  if (s < 3600) return Math.floor(s / 60) + ' 分钟前';
+  if (s < 86400) return Math.floor(s / 3600) + ' 小时前';
+  return Math.floor(s / 86400) + ' 天前';
+}
+
+function syncStatusText() {
+  if (!syncCfg.token) return '未配置 · 数据只在本机';
+  if (!syncCfg.lastSync) return '已配置 · 等待首次同步';
+  return '已同步 · ' + timeAgo(syncCfg.lastSync) + (syncCfg.auto ? ' · 自动同步开' : ' · 自动同步关');
+}
+
+function updateSyncUI() {
+  const el = document.getElementById('syncStatus');
+  if (el) el.textContent = syncStatusText();
+  const t = document.getElementById('syncToken');
+  if (t && document.activeElement !== t) t.value = syncCfg.token;
+  const a = document.getElementById('syncAuto');
+  if (a) a.checked = !!syncCfg.auto;
+}
+
+function scheduleSync() {
+  if (!syncConfigured() || !syncCfg.auto) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(function () { syncNow(false); }, SYNC_DEBOUNCE);
+}
+
+// ===== 云同步 · 数据合并 =====
+function buildPayload() {
+  return {
+    v: 1,
+    app: 'accounting-app',
+    syncedAt: Date.now(),
+    records: data.records,
+    deleted: data.deleted,
+    rules: data.rules,
+    ruleTs: data.ruleTs,
+    ruleDel: data.ruleDel,
+    budget: data.budget,
+    budgetTs: data.budgetTs,
+  };
+}
+
+function mergeData(local, remote) {
+  const out = emptyData();
+
+  // 墓碑：取较大的时间
+  const del = {};
+  [local.deleted, remote.deleted].forEach(function (m) {
+    if (!m) return;
+    for (const k in m) del[k] = Math.max(del[k] || 0, m[k]);
+  });
+  const ruleDel = {};
+  [local.ruleDel, remote.ruleDel].forEach(function (m) {
+    if (!m) return;
+    for (const k in m) ruleDel[k] = Math.max(ruleDel[k] || 0, m[k]);
+  });
+
+  // 记录：按 id 取更新时间较新的那条
+  const byId = {};
+  function addRec(r) {
+    if (!r || !r.id) return;
+    const t = r._u || r.timestamp || 0;
+    const prev = byId[r.id];
+    const pt = prev ? (prev._u || prev.timestamp || 0) : -1;
+    if (!prev || t > pt) byId[r.id] = r;
+  }
+  (local.records || []).forEach(addRec);
+  (remote.records || []).forEach(addRec);
+  out.records = Object.keys(byId).map(function (k) { return byId[k]; })
+    .filter(function (r) {
+      const t = del[r.id];
+      return !(t && (r._u || r.timestamp || 0) <= t);
+    })
+    .sort(function (a, b) { return (a.timestamp || 0) - (b.timestamp || 0); });
+
+  // 规则：按关键词取较新
+  function addRules(rules, ts) {
+    rules = rules || {};
+    for (const k in rules) {
+      const t = (ts && ts[k]) || 0;
+      const cur = out.ruleTs[k];
+      if (cur === undefined || t > cur) {
+        out.rules[k] = rules[k];
+        out.ruleTs[k] = t;
+      }
+    }
+  }
+  addRules(local.rules, local.ruleTs);
+  addRules(remote.rules, remote.ruleTs);
+  for (const k in out.rules) {
+    if (ruleDel[k] !== undefined) delete out.rules[k];
+  }
+
+  // 预算：整体按时间取新
+  const lb = local.budgetTs || 0;
+  const rb = remote.budgetTs || 0;
+  if (rb > lb && remote.budget) {
+    out.budget = remote.budget;
+    out.budgetTs = rb;
+  } else if (local.budget) {
+    out.budget = local.budget;
+    out.budgetTs = lb;
+  }
+  if (!out.budget.categories) out.budget.categories = {};
+
+  out.deleted = del;
+  out.ruleDel = ruleDel;
+  return out;
+}
+
+function applyMerged(m) {
+  data.records = m.records;
+  data.deleted = m.deleted;
+  data.rules = m.rules;
+  data.ruleTs = m.ruleTs;
+  data.ruleDel = m.ruleDel;
+  data.budget = m.budget;
+  data.budgetTs = m.budgetTs;
+  persistLocal();
+}
+
+// 指纹：用于判断同步后本地数据是否真的变了
+function fpOf(m) {
+  const ids = (m.records || []).map(function (r) { return r.id; }).sort().join(',');
+  return ids + '|' + (m.records || []).length + '|' + Object.keys(m.rules || {}).length +
+    '|' + (m.budgetTs || 0) + '|' + Object.keys(m.deleted || {}).length +
+    '|' + Object.keys(m.ruleDel || {}).length;
+}
+
+// ===== 云同步 · Gist 读写 =====
+function gistHeaders() {
+  return {
+    'Authorization': 'Bearer ' + syncCfg.token,
+    'Accept': 'application/vnd.github+json',
+    'Content-Type': 'application/json',
+  };
+}
+
+async function gistCall(url, method, body) {
+  const res = await fetch(url, {
+    method: method || 'GET',
+    headers: gistHeaders(),
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    let hint = 'HTTP ' + res.status;
+    if (res.status === 401) hint = 'Token 无效或已过期';
+    else if (res.status === 403) hint = 'Token 权限不足（需要 Gists 读写）';
+    else if (res.status === 404) hint = 'Gist 不存在（可能被删了）';
+    throw new Error(hint);
+  }
+  return res.json();
+}
+
+async function ensureGist() {
+  if (syncCfg.gistId) return syncCfg.gistId;
+  const list = await gistCall(GIST_API + '?per_page=100');
+  let found = null;
+  (list || []).forEach(function (g) {
+    if (!found && g.files && g.files[GIST_FILE]) found = g;
+  });
+  if (found) {
+    syncCfg.gistId = found.id;
+    saveSyncCfg();
+    return found.id;
+  }
+  const files = {};
+  files[GIST_FILE] = { content: JSON.stringify(buildPayload()) };
+  const created = await gistCall(GIST_API, 'POST', {
+    description: '记账小管家 · 云同步（请勿删除）',
+    public: false,
+    files: files,
+  });
+  syncCfg.gistId = created.id;
+  saveSyncCfg();
+  return created.id;
+}
+
+async function fetchRemote() {
+  const id = await ensureGist();
+  const g = await gistCall(GIST_API + '/' + id + '?t=' + Date.now());
+  const f = g.files && g.files[GIST_FILE];
+  if (!f) return null;
+  let content = f.content;
+  if (f.truncated && f.raw_url) {
+    try {
+      const r = await fetch(f.raw_url);
+      content = await r.text();
+    } catch (e) {}
+  }
+  try { return JSON.parse(content); } catch (e) { return null; }
+}
+
+async function pushRemote() {
+  const id = await ensureGist();
+  const files = {};
+  files[GIST_FILE] = { content: JSON.stringify(buildPayload()) };
+  await gistCall(GIST_API + '/' + id, 'PATCH', { files: files });
+}
+
+// ===== 云同步 · 主流程 =====
+async function syncNow(manual) {
+  if (syncBusy) return;
+  if (!syncConfigured()) {
+    if (manual) showToast('请先填入 Token 并保存');
+    return;
+  }
+  syncBusy = true;
+  if (manual) showToast('同步中…');
+  try {
+    const remote = await fetchRemote();
+    let changed = false;
+    if (remote && remote.app === 'accounting-app') {
+      const before = fpOf(data);
+      const merged = mergeData(data, remote);
+      if (fpOf(merged) !== before) changed = true;
+      applyMerged(merged);
+    }
+    await pushRemote();
+    syncCfg.lastSync = Date.now();
+    saveSyncCfg();
+    if (changed) refreshAll();
+    if (manual) showToast('同步完成 ✓');
+  } catch (e) {
+    if (manual) showToast('同步失败：' + e.message);
+    else console.warn('sync failed:', e);
+  } finally {
+    syncBusy = false;
+    updateSyncUI();
+  }
+}
+
+function initSync() {
+  const t = document.getElementById('syncToken');
+  if (!t) return;
+  t.value = syncCfg.token;
+  document.getElementById('syncAuto').checked = !!syncCfg.auto;
+
+  document.getElementById('syncSaveBtn').onclick = async function () {
+    const val = t.value.trim();
+    if (!val) { showToast('请先填入 GitHub Token'); return; }
+    const old = syncCfg.token;
+    syncCfg.token = val;
+    if (old !== val) { syncCfg.gistId = ''; syncCfg.lastSync = 0; }
+    saveSyncCfg();
+    updateSyncUI();
+    await syncNow(true);
+  };
+
+  document.getElementById('syncNowBtn').onclick = function () { syncNow(true); };
+
+  document.getElementById('syncOffBtn').onclick = function () {
+    if (!confirm('关闭云同步？本机数据会保留，但不再与其他设备同步。')) return;
+    syncCfg = { token: '', gistId: '', auto: true, lastSync: 0 };
+    saveSyncCfg();
+    t.value = '';
+    updateSyncUI();
+    showToast('已关闭云同步');
+  };
+
+  document.getElementById('syncAuto').onchange = function () {
+    syncCfg.auto = this.checked;
+    saveSyncCfg();
+    updateSyncUI();
+    if (syncCfg.auto) scheduleSync();
+  };
+
+  updateSyncUI();
+}
+
+// 切回前台时拉取一次
+document.addEventListener('visibilitychange', function () {
+  if (!document.hidden && syncConfigured() && syncCfg.auto) syncNow(false);
+});
 
 // ===== Utility Functions =====
 function getNow() {
@@ -769,6 +1121,13 @@ function catColor(name) {
 
 function genId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+
+// ===== 规则助手（带时间戳，便于跨设备合并）=====
+function setRule(keyword, cat) {
+  data.rules[keyword] = cat;
+  data.ruleTs[keyword] = Date.now();
+  delete data.ruleDel[keyword];
 }
 
 // ===== Auto Classification =====
@@ -992,6 +1351,7 @@ function renderFullRecords(records) {
 // ===== Delete Record =====
 function deleteRecord(id) {
   if (!confirm('删除这条记录？')) return;
+  data.deleted[id] = Date.now();
   data.records = data.records.filter(r => r.id !== id);
   saveData();
   refreshAll();
@@ -1047,8 +1407,8 @@ function showCategorySelector(note) {
 function selectCategory(cat) {
   if (!pendingNote) return;
   // Save rule
-  data.rules[pendingNote] = cat;
-  saveData();
+  setRule(pendingNote, cat);
+  persistLocal();
   // Add record
   addRecord(pendingAmount, pendingNote, cat);
   // Reset
@@ -1086,6 +1446,7 @@ function addRecord(amount, note, category) {
     category: category,
     date: now.date,
     timestamp: now.timestamp,
+    _u: now.timestamp,
   });
   saveData();
   refreshAll();
@@ -1316,7 +1677,8 @@ function initBudget() {
       showToast('请输入有效金额');
       return;
     }
-    data.budget.total = val;
+      data.budget.total = val;
+    data.budgetTs = Date.now();
     saveData();
     renderBudget();
     updateHeader();
@@ -1379,6 +1741,7 @@ function updateCatBudget(input) {
   } else {
     data.budget.categories[cat] = val;
   }
+  data.budgetTs = Date.now();
   saveData();
   renderBudget();
   showToast(cat + '预算已更新');
@@ -1388,6 +1751,8 @@ document.getElementById('clearMonthBtn').onclick = function() {
   if (!confirm('确定清空本月所有记录？此操作不可恢复！')) return;
   const now = getNow();
   const prefix = getMonthKey(now.year, now.month);
+  const stamp = Date.now();
+  data.records.forEach(r => { if (r.date.startsWith(prefix)) data.deleted[r.id] = stamp; });
   data.records = data.records.filter(r => !r.date.startsWith(prefix));
   saveData();
   refreshAll();
@@ -1456,7 +1821,7 @@ function saveRuleDialog() {
   const keyword = document.getElementById('ruleKeyword').value.trim();
   const cat = document.getElementById('ruleCategory').value;
   if (!keyword) { showToast('请输入关键词'); return; }
-  data.rules[keyword] = cat;
+  setRule(keyword, cat);
   saveData();
   renderRules();
   ruleDialog.classList.remove('show');
@@ -1467,7 +1832,9 @@ function editRule(keyword) { openRuleDialog(keyword); }
 
 function deleteRule(keyword) {
   if (!confirm('删除规则「' + keyword + '」？')) return;
+  data.ruleDel[keyword] = Date.now();
   delete data.rules[keyword];
+  delete data.ruleTs[keyword];
   saveData();
   renderRules();
   showToast('已删除');
@@ -1498,9 +1865,15 @@ document.getElementById('exportBtn').onclick = function() {
 document.getElementById('clearAllBtn').onclick = function() {
   if (!confirm('确定清空全部数据？包括所有记录、规则和预算设置！此操作不可恢复！')) return;
   if (!confirm('再次确认：真的要清空全部数据吗？')) return;
+  const stamp = Date.now();
+  data.records.forEach(r => { data.deleted[r.id] = stamp; });
   data.records = [];
-  data.rules = { ...DEFAULT_RULES };
+  for (const k in data.rules) data.ruleDel[k] = stamp;
+  data.rules = {};
+  data.ruleTs = {};
+  for (const k in DEFAULT_RULES) { data.rules[k] = DEFAULT_RULES[k]; data.ruleTs[k] = stamp; }
   data.budget = { total: 0, categories: {} };
+  data.budgetTs = stamp;
   saveData();
   refreshAll();
   showToast('全部数据已清空');
@@ -1567,9 +1940,13 @@ document.addEventListener('DOMContentLoaded', function() {
   initSearch();
   initBudget();
   setupRuleDialog();
+  initSync();
   renderRules();
   refreshAll();
   updateHeader();
+
+  // 已配置云同步：启动时静默拉取一次
+  if (syncConfigured()) syncNow(false);
 
   // Focus input
   document.getElementById('inputField').focus();
